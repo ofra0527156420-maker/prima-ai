@@ -40,11 +40,13 @@ const BLOCKED = sp('הגישה נחסמה עקב ניסיונות חוזרים �
 const BLOCK_MS = Number(process.env.BLOCK_MS) || 86400000;
 const blocked = {};
 
-// one entry per Yemot extension: its own character mode, extra instruction and opening message
 let CFG = [];
 try { CFG = JSON.parse(process.env.EXTENSIONS || '[]'); } catch (e) { CFG = []; }
 if (!Array.isArray(CFG) || !CFG.length) CFG = [{ p: EXT, m: process.env.MODE || '2', x: '', g: process.env.GREETING || '' }];
-const DEFAULT_GREET = 'שלום אני זיגי שאל אותי כל דבר ובסיום הקש סולמית';
+
+// ברכת הפתיחה של הקו המשפחתי
+const DEFAULT_GREET = 'שלום וברוכים הבאים לקו המשפחתי של משפחת מיראי. שמחים כל כך שהצטרפתם! הקו נועד לחבר בינינו, להתעדכן בשמחות, להישאר קרובים ולהרגיש ביחד תמיד. ההורים, הילדים, הגיסים והנכדים. להודעות, חדשות ועדכונים משפחתיים לחצו 1. לשמחות, ימי הולדת וימי נישואין לחצו 2. לדברי תורה, פרשת השבוע והתחזקות לחצו 3. לפינת הסיפורים, הנוסטלגיה והחוויות המשפחתיות לחצו 4. ובסיום הקש סולמית';
+
 const EXTS = {};
 for (const c of CFG) {
   const p = String(c.p || '').replace(/^\/+|\/+$/g, '');
@@ -56,7 +58,7 @@ for (const c of CFG) {
   };
 }
 const EXT_FIRST = EXTS[Object.keys(EXTS)[0]] || { p: EXT, d: '/' + EXT, sys: buildSys('2', ''), g: sp(DEFAULT_GREET) };
-const GREET = sp(String(process.env.GREETING || '').slice(0, 300)) || sp('שלום אני זיגי שאל אותי כל דבר ובסיום הקש סולמית');
+const GREET = sp(String(process.env.GREETING || '').slice(0, 300)) || sp(DEFAULT_GREET);
 const AGAIN = sp('לא שמעתי שאל שוב');
 const ERR = sp('הייתה תקלה נסו שוב');
 
@@ -67,13 +69,11 @@ const isBudget = e => e && /budget/.test(e.message || '');
 const rot = { text: 0, tts: 0 };
 const calls = {};
 
-// drop state of calls that never sent hangup
 setInterval(() => {
   const now = Date.now();
   for (const id of Object.keys(calls)) if (now - calls[id].t > 3600000) delete calls[id];
 }, 600000).unref();
 
-// fetch with a timeout that never exceeds the remaining time of the current turn
 async function http(url, opt, ms, deadline) {
   const left = deadline ? deadline - Date.now() : ms;
   if (left < 800) throw new Error('turn budget exhausted');
@@ -110,7 +110,6 @@ async function gem(model, body, deadline, pool) {
   throw e;
 }
 
-// fastest thinking level the model accepts; remembered after the first call
 const THINK = ['minimal', 'low', null];
 let thinkIdx = 0;
 async function textGen(body, deadline) {
@@ -136,7 +135,6 @@ function wav(pcm, rate) {
   return Buffer.concat([h, pcm]);
 }
 
-// Gemini 3.8 TTS uses voiceConfig.voice; older TTS models use prebuiltVoiceConfig.voiceName
 const NEW_TTS = /^gemini-(3\.[8-9]|[4-9])/.test(TTS_MODEL);
 const VOICES = NEW_TTS
   ? [{ voice: VOICE }, { prebuiltVoiceConfig: { voiceName: VOICE } }]
@@ -190,7 +188,6 @@ async function download(name, deadline, d) {
 
 async function upload(name, buf, deadline, d) {
   const path = yp(name, d);
-  // documented form first (token and path in the URL, file in the body), then the all-in-body form
   const attempts = [
     { q: true, field: 'file' }, { q: true, field: 'upload' },
     { q: false, field: 'upload' }, { q: false, field: 'file' }
@@ -218,7 +215,6 @@ async function upload(name, buf, deadline, d) {
   throw new Error('upload failed ' + last);
 }
 
-// cleanup is best effort and never blocks or fails a call
 function del(name, d) {
   fetch(YM + 'FileAction?token=' + encodeURIComponent(TOKEN) + '&action=delete&what=' + encodeURIComponent(yp(name, d)), { signal: AbortSignal.timeout(8000) }).catch(() => {});
 }
@@ -245,8 +241,6 @@ app.all(['/yemot', '/yemot/:e'], async (req, res) => {
     const s = calls[id] || (calls[id] = { d: ext.d, sys: ext.sys, g: ext.g, n: 0, x: 0, h: [], p: '', name: '', r: '', t: 0, e: crypto.randomBytes(3).toString('hex') });
     s.t = Date.now();
 
-    // every turn uses a new parameter and file name, because Yemot accumulates parameters across requests
-    // (s.e keeps the names unique even if this server restarted in the middle of a call)
     const ask = pre => {
       s.n++;
       s.p = 'Q' + s.e + s.n;
@@ -306,13 +300,11 @@ app.all(['/yemot', '/yemot/:e'], async (req, res) => {
     }
     return res.send(out);
   } catch (e) {
-    // last resort: always answer Yemot with plain text, never HTML or an empty reply
     console.error(id, 'fatal', e.message);
     if (!res.headersSent) res.send('id_list_message=t-' + ERR);
   }
 });
 
-// the opening message can be a recording made by Gemini; it is played when the file greet.wav exists in the extension
 const greetOk = {};
 async function greetFile(d, deadline) {
   if (greetOk[d] !== undefined) return greetOk[d];
@@ -327,8 +319,6 @@ async function greetFile(d, deadline) {
   }
 }
 
-// asks Gemini to read the given text aloud and stores it as a file in the given extension
-// dir is an extension number such as 5 or 5/2, or empty for the main menu of the line; file is the name without .wav
 let lastRec = 0;
 app.post('/record', async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').type('text/plain; charset=utf-8');
@@ -353,7 +343,6 @@ app.post('/record', async (req, res) => {
   }
 });
 
-// quick end to end check of the whole chain, without a phone call
 let lastTest = 0;
 app.get('/selftest', async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*').type('text/plain; charset=utf-8');
@@ -397,7 +386,8 @@ app.use((err, req, res, next) => {
   console.error('express', err && err.message);
   if (!res.headersSent) res.type('text/plain').send('id_list_message=t-' + ERR);
 });
-process.on('unhandledRejection', e => console.error('unhandledRejection', e && e.message));
-process.on('uncaughtException', e => console.error('uncaughtException', e && e.message));
 
-app.listen(process.env.PORT || 3000, () => console.log('zygy up'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('Server is running on port ' + PORT);
+});
